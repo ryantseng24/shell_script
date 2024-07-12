@@ -1,0 +1,119 @@
+#!/bin/bash
+
+# 配置參數
+# 需新增一個文字檔ltm_ip_list.txt 寫進F5設備的IP list
+IP_LIST_FILE="ltm_ip_list.txt"
+# 定義backup server 要儲存設定檔案的目錄
+BACKUP_SERVER_DIR="/home/uniforce/backup_f5"
+BACKUP_DIR="/var/local/ucs"
+REMOTE_USER="root"
+REMOTE_PASSWORD="1q2w#E\$R"
+DATE=$(date +%H%M-%m%d%y)
+LOG_FILE="backup_log_$DATE.txt"
+
+echo "Debug: Script started" | tee -a $LOG_FILE
+
+# 檢查IP列表文件是否存在
+if [ ! -f "$IP_LIST_FILE" ]; then
+    echo "Error: IP list file $IP_LIST_FILE not found." | tee -a $LOG_FILE
+    exit 1
+fi
+
+echo "Debug: IP list file found" | tee -a $LOG_FILE
+
+# 顯示 IP 列表文件的內容
+echo "Debug: Content of $IP_LIST_FILE:" | tee -a $LOG_FILE
+cat "$IP_LIST_FILE" | tee -a $LOG_FILE
+
+# 定義備份函數
+backup_ip() {
+    local LTM_A_IP=$1
+    local TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "$TIMESTAMP Processing $LTM_A_IP..." | tee -a $LOG_FILE
+    
+    # 將 IP 地址中的點替換為下劃線
+    local LTM_A_IP_UNDERSCORE=$(echo $LTM_A_IP | tr '.' '_')
+    local CONFIG_FILE="${LTM_A_IP_UNDERSCORE}_${DATE}_backup.ucs"
+    
+    # 遠程 SSH 到 F5 LTM A 並執行備份操作
+    echo "$TIMESTAMP Connecting to $LTM_A_IP..." | tee -a $LOG_FILE
+    if ! sshpass -p $REMOTE_PASSWORD ssh -o StrictHostKeyChecking=no -T $REMOTE_USER@$LTM_A_IP << EOF > ssh_output_${LTM_A_IP}.log 2>&1
+        echo "$TIMESTAMP Connected to $LTM_A_IP"
+        echo "$TIMESTAMP Saving UCS to $CONFIG_FILE"
+        tmsh save sys ucs $CONFIG_FILE
+        
+        # 等待備份完成
+        max_attempts=30
+        attempt=0
+        while [ \$attempt -lt \$max_attempts ]; do
+            if [ -f "$BACKUP_DIR/$CONFIG_FILE" ]; then
+                echo "Backup file $CONFIG_FILE created successfully."
+                break
+            fi
+            echo "Waiting for backup to complete... (Attempt \$((attempt+1))/\$max_attempts)"
+            sleep 10
+            attempt=\$((attempt+1))
+        done
+        
+        if [ \$attempt -eq \$max_attempts ]; then
+            echo "Backup did not complete within the expected time."
+            exit 1
+        fi
+EOF
+    then
+        echo "$TIMESTAMP SSH connection failed for $LTM_A_IP" | tee -a $LOG_FILE
+        return
+    fi
+    
+    # 輸出 SSH 命令的結果
+    cat ssh_output_${LTM_A_IP}.log | tee -a $LOG_FILE
+    
+    # 檢查備份是否成功
+    echo "$TIMESTAMP Checking if backup file exists on $LTM_A_IP" | tee -a $LOG_FILE
+    if ! sshpass -p $REMOTE_PASSWORD ssh -o StrictHostKeyChecking=no -T $REMOTE_USER@$LTM_A_IP "[ -f $BACKUP_DIR/$CONFIG_FILE ]"
+    then
+        echo "$TIMESTAMP Backup failed for $LTM_A_IP" | tee -a $LOG_FILE
+        return
+    fi
+    
+    local FINAL_BACKUP_FILE="${LTM_A_IP_UNDERSCORE}_${DATE}_backup.ucs"
+    echo "$TIMESTAMP Copying backup file from $LTM_A_IP to $BACKUP_SERVER_DIR/$FINAL_BACKUP_FILE" | tee -a $LOG_FILE
+    if ! sshpass -p $REMOTE_PASSWORD scp -o StrictHostKeyChecking=no $REMOTE_USER@$LTM_A_IP:$BACKUP_DIR/$CONFIG_FILE $BACKUP_SERVER_DIR/$FINAL_BACKUP_FILE
+    then
+        echo "$TIMESTAMP SCP failed for $LTM_A_IP" | tee -a $LOG_FILE
+        return
+    fi
+    
+    echo "$TIMESTAMP Backup successful: $FINAL_BACKUP_FILE copied to $BACKUP_SERVER_DIR" | tee -a $LOG_FILE
+    
+    # 刪除 F5 本地的備份文件
+    echo "$TIMESTAMP Deleting local backup file $CONFIG_FILE on $LTM_A_IP" | tee -a $LOG_FILE
+    if ! sshpass -p $REMOTE_PASSWORD ssh -o StrictHostKeyChecking=no -T $REMOTE_USER@$LTM_A_IP "rm -f $BACKUP_DIR/$CONFIG_FILE"
+    then
+        echo "$TIMESTAMP Failed to delete local backup file $CONFIG_FILE on $LTM_A_IP" | tee -a $LOG_FILE
+    else
+        echo "$TIMESTAMP Local backup file $CONFIG_FILE deleted successfully on $LTM_A_IP" | tee -a $LOG_FILE
+    fi
+    
+    echo "Debug: Finished processing $LTM_A_IP" | tee -a $LOG_FILE
+}
+
+# 並行處理所有IP
+while IFS= read -r LTM_A_IP || [ -n "$LTM_A_IP" ]
+do
+    if [[ -n "$LTM_A_IP" ]]; then
+        echo "Debug: Starting backup for $LTM_A_IP" | tee -a $LOG_FILE
+        backup_ip "$LTM_A_IP" &
+    fi
+done < "$IP_LIST_FILE"
+
+# 等待所有後台作業完成
+wait
+
+echo "Debug: All backups completed" | tee -a $LOG_FILE
+
+# 完成
+TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+echo "$TIMESTAMP Backup process completed. Check $LOG_FILE for details." | tee -a $LOG_FILE
+
+echo "Debug: Script ended" | tee -a $LOG_FILE
