@@ -8,6 +8,13 @@ B_IP="103.31.198.2"  # B Server IP
 # 分隔線
 SEPARATOR="~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 
+# 函數：獲取NS記錄，包括ANSWER和AUTHORITY部分
+get_ns_records() {
+    local server=$1
+    local domain=$2
+    dig @${server} NS ${domain} +norec | awk '/^;; ANSWER SECTION:/,/^$/ {if (NF==5 && $4=="NS") print $5}; /^;; AUTHORITY SECTION:/,/^$/ {if (NF==5 && $4=="NS") print $5}'
+}
+
 # 從zone檔案中讀取每一個zone name
 while read -r ZONE; do
     OUTPUT_FILE="${ZONE}_compare_result.txt"
@@ -59,7 +66,26 @@ while read -r ZONE; do
                 echo "A Server: ${MNAME} ${RNAME}" >> ${OUTPUT_FILE}
                 echo "B Server: ${B_MNAME} ${B_RNAME}" >> ${OUTPUT_FILE}
             fi
-        elif [ "$RECORD_TYPE" == "NS" ] || [ "$RECORD_TYPE" == "MX" ] || [ "$RECORD_TYPE" == "TXT" ] || [ "$RECORD_TYPE" == "PTR" ]; then
+        elif [ "$RECORD_TYPE" == "NS" ]; then
+            # 使用新函數獲取NS記錄
+            A_NS_RESULT=$(get_ns_records ${A_IP} ${RECORD_NAME})
+            B_NS_RESULT=$(get_ns_records ${B_IP} ${RECORD_NAME})
+            
+            # 排序並比較結果
+            A_SORTED=$(echo "$A_NS_RESULT" | sort)
+            B_SORTED=$(echo "$B_NS_RESULT" | sort)
+            
+            if [ "$A_SORTED" == "$B_SORTED" ]; then
+                echo -e "${SEPARATOR}\n${RECORD_NAME} IN NS 比對ok" >> ${OUTPUT_FILE}
+                echo "$A_SORTED" >> ${OUTPUT_FILE}
+            else
+                echo -e "${SEPARATOR}\n${RECORD_NAME} NS紀錄不同於A Server" >> ${OUTPUT_FILE}
+                echo "A Server NS紀錄:" >> ${OUTPUT_FILE}
+                echo "$A_SORTED" >> ${OUTPUT_FILE}
+                echo "B Server NS紀錄:" >> ${OUTPUT_FILE}
+                echo "$B_SORTED" >> ${OUTPUT_FILE}
+            fi
+        elif [ "$RECORD_TYPE" == "MX" ] || [ "$RECORD_TYPE" == "TXT" ] || [ "$RECORD_TYPE" == "PTR" ]; then
             # 查詢B Server的記錄
             B_RESULT=$(dig @${B_IP} ${RECORD_TYPE} ${RECORD_NAME} +short)
             
