@@ -12,33 +12,18 @@ SEPARATOR="~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 get_ns_records() {
     local server=$1
     local domain=$2
-    dig @${server} NS ${domain} +norec | awk '/^;; ANSWER SECTION:/,/^$/ {if (NF==5 && $4=="NS") print $5}; /^;; AUTHORITY SECTION:/,/^$/ {if (NF==5 && $4=="NS") print $5}'
+    dig @${server} NS ${domain} +norec |
+    awk '/^;; ANSWER SECTION:/,/^$/ {if (NF==5 && $4=="NS") print $5}; /^;; AUTHORITY SECTION:/,/^$/ {if (NF==5 && $4=="NS") print $5}' |
+    tr '[:upper:]' '[:lower:]' | sed 's/\.$//' | sort
 }
 
-# 函數：比較兩個記錄集合
-compare_records() {
-    local a_records="$1"
-    local b_records="$2"
-    
-    # 將記錄分行並排序
-    local a_sorted=($(echo "$a_records" | tr ' ' '\n' | sort | grep -v '^$'))
-    local b_sorted=($(echo "$b_records" | tr ' ' '\n' | sort | grep -v '^$'))
-    
-    # 轉換為以空格分隔的字串以進行比較
-    local a_str="${a_sorted[*]}"
-    local b_str="${b_sorted[*]}"
-    
-    if [ "$a_str" == "$b_str" ]; then
-        return 0  # 相同
-    else
-        return 1  # 不同
-    fi
-}
+# 設置排序環境以避免locale問題
+export LC_ALL=C
 
 # 從zone檔案中讀取每一個zone name
 while read -r ZONE; do
     OUTPUT_FILE="${ZONE}_compare_result.txt"
-    
+
     # 查詢A Server的所有DNS紀錄
     dig @${A_IP} axfr ${ZONE} | grep -E "IN\s+(A|CNAME|TXT|NS|SOA|PTR|MX)" > a_records_${ZONE}.txt
 
@@ -49,13 +34,12 @@ while read -r ZONE; do
     while read -r line; do
         # 解析紀錄的各個部分
         RECORD_NAME=$(echo $line | awk '{print $1}')
-        TTL=$(echo $line | awk '{print $2}')
         RECORD_TYPE=$(echo $line | awk '{print $4}')
         RECORD_DATA=$(echo $line | awk '{$1=$2=$3=$4=""; print $0}' | sed 's/^[ \t]*//')
 
         # 將記錄添加到關聯數組中
         if [[ -v "records[$RECORD_NAME $RECORD_TYPE]" ]]; then
-            records["$RECORD_NAME $RECORD_TYPE"]+=" $RECORD_DATA"
+            records["$RECORD_NAME $RECORD_TYPE"]+=$'\n'"$RECORD_DATA"
         else
             records["$RECORD_NAME $RECORD_TYPE"]="$RECORD_DATA"
         fi
@@ -67,14 +51,16 @@ while read -r ZONE; do
         A_RECORDS="${records[$key]}"
 
         if [ "$RECORD_TYPE" == "SOA" ]; then
-            # SOA記錄處理邏輯保持不變
+            # 處理SOA記錄
             MNAME=$(echo "$A_RECORDS" | awk '{print $1}')
             RNAME=$(echo "$A_RECORDS" | awk '{print $2}')
 
+            # 對B Server進行SOA查詢
             B_RESULT=$(dig @${B_IP} SOA ${RECORD_NAME} +short)
             B_MNAME=$(echo $B_RESULT | awk '{print $1}')
             B_RNAME=$(echo $B_RESULT | awk '{print $2}')
 
+            # 比對SOA紀錄的各個部分，只比對MNAME和RNAME
             if [ "$MNAME" == "$B_MNAME" ] && [ "$RNAME" == "$B_RNAME" ]; then
                 echo -e "${SEPARATOR}\n${RECORD_NAME} IN SOA ${MNAME} ${RNAME} 比對ok" >> ${OUTPUT_FILE}
             else
@@ -82,12 +68,13 @@ while read -r ZONE; do
                 echo "A Server: ${MNAME} ${RNAME}" >> ${OUTPUT_FILE}
                 echo "B Server: ${B_MNAME} ${B_RNAME}" >> ${OUTPUT_FILE}
             fi
+
         elif [ "$RECORD_TYPE" == "NS" ]; then
-            # NS記錄處理邏輯保持不變
+            # 使用新函數獲取NS記錄
             A_NS_RESULT=$(get_ns_records ${A_IP} ${RECORD_NAME})
             B_NS_RESULT=$(get_ns_records ${B_IP} ${RECORD_NAME})
-            
-            if compare_records "$A_NS_RESULT" "$B_NS_RESULT"; then
+
+            if [ "$A_NS_RESULT" == "$B_NS_RESULT" ]; then
                 echo -e "${SEPARATOR}\n${RECORD_NAME} IN NS 比對ok" >> ${OUTPUT_FILE}
                 echo "$A_NS_RESULT" >> ${OUTPUT_FILE}
             else
@@ -97,19 +84,22 @@ while read -r ZONE; do
                 echo "B Server NS紀錄:" >> ${OUTPUT_FILE}
                 echo "$B_NS_RESULT" >> ${OUTPUT_FILE}
             fi
-        else  # A, CNAME, MX, TXT, PTR 記錄
-            # 查詢B Server的記錄，使用+short格式
+
+        else
+            # A 和其他記錄類型
             B_RESULT=$(dig @${B_IP} ${RECORD_TYPE} ${RECORD_NAME} +short)
-            
-            if compare_records "$A_RECORDS" "$B_RESULT"; then
+            A_SORTED=$(echo "$A_RECORDS" | sort | tr '\n' ' ')
+            B_SORTED=$(echo "$B_RESULT" | sort | tr '\n' ' ')
+
+            if [ "$A_SORTED" == "$B_SORTED" ]; then
                 echo -e "${SEPARATOR}\n${RECORD_NAME} IN ${RECORD_TYPE} 比對ok" >> ${OUTPUT_FILE}
-                echo "$A_RECORDS" >> ${OUTPUT_FILE}
+                echo "$A_SORTED" >> ${OUTPUT_FILE}
             else
                 echo -e "${SEPARATOR}\n${RECORD_NAME} ${RECORD_TYPE}紀錄不同於A Server" >> ${OUTPUT_FILE}
                 echo "A Server:" >> ${OUTPUT_FILE}
-                echo "$A_RECORDS" >> ${OUTPUT_FILE}
+                echo "$A_SORTED" >> ${OUTPUT_FILE}
                 echo "B Server:" >> ${OUTPUT_FILE}
-                echo "$B_RESULT" >> ${OUTPUT_FILE}
+                echo "$B_SORTED" >> ${OUTPUT_FILE}
             fi
         fi
     done
